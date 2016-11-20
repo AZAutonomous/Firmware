@@ -1,0 +1,87 @@
+Aileron/elevator/throttle/rudder/flaps mixer for PX4FMU
+=======================================================
+
+This file defines mixers suitable for controlling the 25% XTreme Decathalon
+using PX4FMU.
+The configuration assumes the aileron servos are connected to PX4FMU servo
+output 0 and 1, the elevator servos to output 2 and 3, the throttle
+to output 4, the wheel to output 5 and the flaps to output 6 and 7.
+
+Inputs to the mixer come from channel group 0 (vehicle attitude), channels 0
+(roll), 1 (pitch), 2 (yaw) and 3 (thrust) 4 (flaps) 6 (flaperon).
+
+SYNTAX
+M: <control count>
+O: <-ve scale> <+ve scale> <offset> <lower limit> <upper limit> 
+S: <group> <index> <-ve scale> <+ve scale> <offset> <lower limit> <upper limit> 
+
+Control Group #0 (Flight Control)
+
+0: roll (-1..1)
+1: pitch (-1..1)
+2: yaw (-1..1)
+3: throttle (0..1 normal range, -1..1 for variable pitch / thrust reversers)
+4: flaps (-1..1)
+5: spoilers (-1..1)
+6: airbrakes (-1..1)
+7: landing gear (-1..1)
+
+Aileron mixer (roll + flaperon)
+--------------------------------
+
+Aileron Right
+M: 2
+O:      10000  10000      0 -10000  10000
+S: 0 0  10000  10000      0 -10000  10000
+S: 0 6  10000  10000      0 -10000  10000
+
+Aileron Left
+M: 2
+O:      10000  10000      0 -10000  10000
+S: 0 0  10000  10000      0 -10000  10000
+S: 0 6 -10000 -10000      0 -10000  10000
+
+Elevator mixers
+-------------
+
+Elevator Right
+M: 1
+O:      10000  10000      0 -10000  10000
+S: 0 1  -10000 -10000      0 -10000  10000
+
+Elevator Left
+M: 1
+O:      10000  10000      0 -10000  10000
+S: 0 1  10000  10000      0 -10000  10000
+
+Motor speed mixer
+-----------------
+Two scalers total (output, thrust).
+
+This mixer generates a full-range output (-1 to 1) from an input in the (0 - 1)
+range.  Inputs below zero are treated as zero.
+
+M: 1
+O:      10000  10000      0 -10000  10000
+S: 0 3      0  20000 -10000 -10000  10000
+
+Rudder mixer
+------------
+
+M: 1
+O:      10000  10000      0 -10000  10000
+S: 0 2 -10000 -10000      0 -10000  10000
+
+Flaps mixer
+------------
+
+Flaps right
+M: 1
+O:      10000  10000      0 -10000  10000
+S: 0 4  10000  10000      0 -10000  10000
+
+Flaps left
+M: 1
+O:      10000  10000      0 -10000  10000
+S: 0 4  10000  10000      0 -10000  10000
+
