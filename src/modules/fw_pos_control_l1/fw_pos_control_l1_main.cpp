@@ -55,6 +55,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <math.h>
+#include <float.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -113,6 +114,9 @@ static int	_control_task = -1;			/**< task handle for sensor task */
 #define THROTTLE_THRESH 0.05f 	///< max throttle from user which will not lead to motors spinning up in altitude controlled modes
 #define MANUAL_THROTTLE_CLIMBOUT_THRESH 0.85f	///< a throttle / pitch input above this value leads to the system switching to climbout mode
 #define ALTHOLD_EPV_RESET_THRESH 5.0f
+
+using matrix::Eulerf;
+using matrix::Quatf;
 
 /**
  * L1 control app start / stop handling function
@@ -247,6 +251,10 @@ private:
 	hrt_abstime _last_tecs_update;
 	float _asp_after_transition;
 	bool _was_in_transition;
+
+	// estimator reset counters
+	uint8_t _pos_reset_counter;		// captures the number of times the estimator has reset the horizontal position
+	uint8_t _alt_reset_counter;		// captures the number of times the estimator has reset the altitude state
 
 	ECL_L1_Pos_Controller				_l1_control;
 	TECS						_tecs;
@@ -552,7 +560,7 @@ FixedwingPositionControl::FixedwingPositionControl() :
 	_fw_pos_ctrl_status_pub(nullptr),
 
 	/* publication ID */
-	_attitude_setpoint_id(0),
+	_attitude_setpoint_id(nullptr),
 
 	/* states */
 	_ctrl_state(),
@@ -613,6 +621,8 @@ FixedwingPositionControl::FixedwingPositionControl() :
 	_last_tecs_update(0.0f),
 	_asp_after_transition(0.0f),
 	_was_in_transition(false),
+	_pos_reset_counter(0),
+	_alt_reset_counter(0),
 	_l1_control(),
 	_tecs(),
 	_control_mode_current(FW_POSCTRL_MODE_OTHER),
@@ -1095,7 +1105,7 @@ void FixedwingPositionControl::get_waypoint_heading_distance(float heading, floa
 
 	if (flag_init) {
 		// on init set previous waypoint HDG_HOLD_SET_BACK_DIST meters behind us
-		waypoint_from_heading_and_distance(_global_pos.lat, _global_pos.lon, heading + 180.0f * M_DEG_TO_RAD_F ,
+		waypoint_from_heading_and_distance(_global_pos.lat, _global_pos.lon, heading + 180.0f * M_DEG_TO_RAD_F,
 						   HDG_HOLD_SET_BACK_DIST,
 						   &temp_prev.lat, &temp_prev.lon);
 
@@ -1499,32 +1509,27 @@ FixedwingPositionControl::control_position(const math::Vector<2> &current_positi
 
 			// we want the plane to keep tracking the desired flight path until we start flaring
 			// if we go into heading hold mode earlier then we risk to be pushed away from the runway by cross winds
-			//if (land_noreturn_vertical) {
-			if (wp_distance < _parameters.land_heading_hold_horizontal_distance || _land_noreturn_horizontal) {
+			if (!_land_noreturn_horizontal &&
+			    ((wp_distance < _parameters.land_heading_hold_horizontal_distance) || _land_noreturn_vertical)) {
 
-				/* heading hold, along the line connecting this and the last waypoint */
+				if (pos_sp_triplet.previous.valid) {
+					/* heading hold, along the line connecting this and the last waypoint */
+					_target_bearing = bearing_lastwp_currwp;
 
-				if (!_land_noreturn_horizontal) {
-					// set target_bearing in first occurrence
-					if (pos_sp_triplet.previous.valid) {
-						_target_bearing = bearing_lastwp_currwp;
-
-					} else {
-						_target_bearing = _yaw;
-					}
-
-					mavlink_log_info(&_mavlink_log_pub, "#Landing, heading hold");
+				} else {
+					_target_bearing = _yaw;
 				}
 
-//					warnx("NORET: %d, target_bearing: %d, yaw: %d", (int)land_noreturn_horizontal, (int)math::degrees(target_bearing), (int)math::degrees(_yaw));
+				_land_noreturn_horizontal = true;
+				mavlink_log_info(&_mavlink_log_pub, "#Landing, heading hold");
+			}
 
+			if (_land_noreturn_horizontal) {
+				// heading hold
 				_l1_control.navigate_heading(_target_bearing, _yaw, nav_speed_2d);
 
-				_land_noreturn_horizontal = true;
-
 			} else {
-
-				/* normal navigation */
+				// normal navigation
 				_l1_control.navigate_waypoints(prev_wp, curr_wp, current_position, nav_speed_2d);
 			}
 
@@ -1612,8 +1617,10 @@ FixedwingPositionControl::control_position(const math::Vector<2> &current_positi
 				throttle_max = _parameters.throttle_max;
 
 				/* enable direct yaw control using rudder/wheel */
-				_att_sp.yaw_body = _target_bearing;
-				_att_sp.fw_control_yaw = true;
+				if (_land_noreturn_horizontal) {
+					_att_sp.yaw_body = _target_bearing;
+					_att_sp.fw_control_yaw = true;
+				}
 
 				if (_global_pos.alt < terrain_alt + _landingslope.motor_lim_relative_alt() || _land_motor_lim) {
 					throttle_max = math::min(throttle_max, _parameters.throttle_land_max);
@@ -2283,6 +2290,27 @@ FixedwingPositionControl::task_main()
 			/* load local copies */
 			orb_copy(ORB_ID(vehicle_global_position), _global_pos_sub, &_global_pos);
 
+			// handle estimator reset events. we only adjust setpoins for manual modes
+			if (_control_mode.flag_control_manual_enabled) {
+				if (_control_mode.flag_control_altitude_enabled && _global_pos.alt_reset_counter != _alt_reset_counter) {
+					_hold_alt += _global_pos.delta_alt;
+					// make TECS accept step in altitude and demanded altitude
+					_tecs.handle_alt_step(_global_pos.delta_alt, _global_pos.alt);
+				}
+
+				// adjust navigation waypoints in position control mode
+				if (_control_mode.flag_control_altitude_enabled && _control_mode.flag_control_velocity_enabled
+				    && _global_pos.lat_lon_reset_counter != _pos_reset_counter) {
+
+					// reset heading hold flag, which will re-initialise position control
+					_hdg_hold_enabled = false;
+				}
+			}
+
+			// update the reset counters in any case
+			_alt_reset_counter = _global_pos.alt_reset_counter;
+			_pos_reset_counter = _global_pos.lat_lon_reset_counter;
+
 			// XXX add timestamp check
 			_global_pos_valid = true;
 
@@ -2311,14 +2339,27 @@ FixedwingPositionControl::task_main()
 					_att_sp.pitch_body = math::constrain(_att_sp.pitch_body, -_parameters.man_pitch_max_rad, _parameters.man_pitch_max_rad);
 				}
 
-				/* lazily publish the setpoint only once available */
-				if (_attitude_sp_pub != nullptr) {
-					/* publish the attitude setpoint */
-					orb_publish(_attitude_setpoint_id, _attitude_sp_pub, &_att_sp);
+				Quatf q(Eulerf(_att_sp.roll_body, _att_sp.pitch_body, _att_sp.yaw_body));
+				_att_sp.q_d[0] = q(0);
+				_att_sp.q_d[1] = q(1);
+				_att_sp.q_d[2] = q(2);
+				_att_sp.q_d[3] = q(3);
+				_att_sp.q_d_valid = true;
 
-				} else if (_attitude_setpoint_id) {
-					/* advertise and publish */
-					_attitude_sp_pub = orb_advertise(_attitude_setpoint_id, &_att_sp);
+				if (!_control_mode.flag_control_offboard_enabled ||
+				    _control_mode.flag_control_position_enabled ||
+				    _control_mode.flag_control_velocity_enabled ||
+				    _control_mode.flag_control_acceleration_enabled) {
+
+					/* lazily publish the setpoint only once available */
+					if (_attitude_sp_pub != nullptr) {
+						/* publish the attitude setpoint */
+						orb_publish(_attitude_setpoint_id, _attitude_sp_pub, &_att_sp);
+
+					} else if (_attitude_setpoint_id) {
+						/* advertise and publish */
+						_attitude_sp_pub = orb_advertise(_attitude_setpoint_id, &_att_sp);
+					}
 				}
 
 				/* XXX check if radius makes sense here */

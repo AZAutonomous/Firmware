@@ -210,6 +210,8 @@ private:
 		param_t vtol_type;
 		param_t elevons_mc_lock;
 		param_t fw_min_alt;
+		param_t front_trans_time_openloop;
+		param_t front_trans_time_min;
 	} _params_handles;
 
 	/* for multicopters it is usual to have a non-zero idle speed of the engines
@@ -218,10 +220,7 @@ private:
 	int _transition_command;
 	bool _abort_front_transition;
 
-	VtolType *_vtol_type;	// base class for different vtol types
-	Tiltrotor *_tiltrotor;	// tailsitter vtol type
-	Tailsitter *_tailsitter;	// tiltrotor vtol type
-	Standard *_standard;	// standard vtol type
+	VtolType *_vtol_type = nullptr;	// base class for different vtol types
 
 //*****************Member functions***********************************************************************
 
